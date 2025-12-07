@@ -16,6 +16,8 @@ library(RColorBrewer) # 用于后续病毒绘图配色
 # 对牛乳腺细胞进行分析
 seurat_obj <- readRDS("D:/单细胞分析/92501092801_DXF_cowvirus_20250910/MockvsAHvsCXvsTX/MockvsAHvsCXvsTX_combined.rds")
 print(seurat_obj)
+
+print("数据加载完成！")
 # 绘制初步 UMAP
 DimPlot(seurat_obj, reduction = "umap", label = TRUE)
 # ------------------------------------------------------------------------
