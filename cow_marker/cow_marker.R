@@ -30,50 +30,7 @@ seurat_obj <- subset(seurat_obj, idents = c("3"), invert = TRUE)
 DimPlot(seurat_obj, reduction = "umap", label = TRUE) + ggtitle("")
 
 ##########################################################################
-### 阶段三：牛乳腺细胞核心注释与热图 (Heatmap)
-##########################################################################
-
-# 1. 大类划分逻辑 (Cluster -> Cell Type)
-# ------------------------------------------------------------------------
-cluster_to_celltype_map <- list(
-  "LumSec" = c( 0,2,14 ),
-  "LumHR" = c( 15 ),
-  "Fibroblasts" = c( 7,13,16 ), 
-  "Basal" = c( 1,4,6,10,11,12 ),
-  "Endothelial" = c(5),
-  "vSMC" = c(8),
-  "Myoepithelial" = c(9)
-)
-
-# 检查依赖列
-if(!"seurat_clusters" %in% colnames(seurat_obj@meta.data)){
-  stop("错误：找不到 'seurat_clusters' 列，请确保已完成聚类分析(FindClusters)。")
-}
-
-# 创建新的元数据列并赋值
-seurat_obj$major_cell_type <- as.character(seurat_obj$seurat_clusters)
-
-for (cell_type in names(cluster_to_celltype_map)) {
-  cluster_ids <- cluster_to_celltype_map[[cell_type]]
-  cells_to_rename <- seurat_obj$seurat_clusters %in% cluster_ids
-  seurat_obj$major_cell_type[cells_to_rename] <- cell_type
-}
-
-# 设置身份与顺序
-Idents(seurat_obj) <- "major_cell_type"
-seurat_obj$major_cell_type <- factor(
-  seurat_obj$major_cell_type, 
-  levels = names(cluster_to_celltype_map)
-)
-Idents(seurat_obj) <- seurat_obj$major_cell_type
-
-# 检查并可视化
-print(table(seurat_obj$major_cell_type))
-DimPlot(seurat_obj, reduction = "umap", group.by = "major_cell_type", label = TRUE) +
-  ggtitle("Major Cell Types of Bovine Mammary Gland")
-
-##########################################################################
-### 阶段三（最终修正版）：自定义顺序 + 强制内皮基因
+### 阶段三（最终修正版）：自定义顺序 + 多细胞类型强制指定 Marker
 ##########################################################################
 
 library(dplyr)
@@ -84,21 +41,36 @@ library(circlize)
 
 print("开始最终版热图绘制...")
 
-# 1. 设定严格的细胞顺序 (您的核心需求)
-# ------------------------------------------------------------------------
+# ========================================================================
+# 1. 设定严格的细胞顺序 & 强制显示的基因
+# ========================================================================
+
+# 1.1 设定细胞在热图上的排列顺序 (X轴)
 my_levels <- c("LumSec", "LumHR", "Basal", "Myoepithelial", "Endothelial", "vSMC", "Fibroblasts")
 
+# 1.2 【新增】设定需要强制显示的基因 (配置列表)
+# 格式： "细胞类型名称" = c("基因1", "基因2"...)
+# 逻辑： 如果在差异基因里找到了这些基因，优先排在最前；不足10个的位置由其他高表达基因补齐
+manual_marker_config <- list(
+  "Endothelial" = c("PECAM1", "MOBP", "RAPGEF4"),
+  "LumHR"       = c("PGR"),  # 强制添加孕酮受体
+  "Fibroblasts" = c("COL6A1", "COL6A2", "COL1A2") # 强制添加胶原蛋白家族
+)
+
+# ========================================================================
 # 2. 确保 Seurat 对象遵循此顺序
-# ------------------------------------------------------------------------
+# ========================================================================
+
 # 过滤掉数据中可能不存在的类型
 existing_levels <- intersect(my_levels, unique(seurat_obj$major_cell_type))
 
-# 设置因子水平 (这将决定热图列的顺序)
+# 设置因子水平
 seurat_obj$major_cell_type <- factor(seurat_obj$major_cell_type, levels = existing_levels)
 Idents(seurat_obj) <- "major_cell_type"
 
-# 3. 计算差异基因 (如果已计算过 markers_7_types，可跳过此步)
-# ------------------------------------------------------------------------
+# ========================================================================
+# 3. 计算差异基因 (如果已计算过则跳过)
+# ========================================================================
 if (!exists("markers_7_types")) {
   print("正在计算差异基因...")
   markers_7_types <- FindAllMarkers(
@@ -111,51 +83,53 @@ if (!exists("markers_7_types")) {
 }
 
 # ========================================================================
-# 4. 提取 Top 10 基因 (核心逻辑：强制内皮基因 + 顺序对齐)
+# 4. 提取 Top 10 基因 (核心逻辑升级：支持批量强制指定)
 # ========================================================================
 
-# A. 定义内皮细胞必须包含的基因
-endo_force_genes <- c("PECAM1", "MOBP", "RAPGEF4")
+final_gene_list <- c() # 用于存储最终的基因名顺序
+final_df_list <- list() # 用于存储数据框以便检查
 
-# B. 拆分处理
+# 这里的循环确保了最终基因列表严格按照 existing_levels 的细胞顺序排列
+for (ctype in existing_levels) {
+  
+  # A. 获取当前细胞类型的所有差异基因，按 LogFC 排序
+  current_markers <- markers_7_types %>% 
+    filter(cluster == ctype) %>% 
+    arrange(desc(avg_log2FC))
+  
+  # B. 检查是否有强制指定的基因
+  if (ctype %in% names(manual_marker_config)) {
+    # 获取强制基因列表
+    force_genes <- manual_marker_config[[ctype]]
+    
+    # 1. 提取强制基因 (注意：必须是计算出来的差异基因里有的)
+    # 如果PGR表达量太低没被FindAllMarkers算出来，这里会自动忽略，防止报错
+    df_force <- current_markers %>% filter(gene %in% force_genes)
+    
+    # 2. 提取剩余的自动基因来补位 (补齐到10个)
+    n_needed <- 10 - nrow(df_force)
+    df_auto <- current_markers %>% 
+      filter(!gene %in% force_genes) %>% 
+      head(n = n_needed)
+    
+    # 3. 合并
+    df_final <- bind_rows(df_force, df_auto)
+    
+  } else {
+    # C. 如果没有强制要求，直接取 Top 10
+    df_final <- current_markers %>% head(n = 10)
+  }
+  
+  # D. 存储结果
+  final_df_list[[ctype]] <- df_final
+  final_gene_list <- c(final_gene_list, df_final$gene)
+}
 
-# --- Part 1: 非内皮细胞 (标准 Top 10) ---
-top10_others <- markers_7_types %>%
-  filter(cluster != "Endothelial") %>%
-  group_by(cluster) %>%
-  top_n(n = 10, wt = avg_log2FC) %>%
-  ungroup() 
+# 合并为一个总表 (仅用于查看，不用于画图顺序，画图顺序由 final_gene_list 决定)
+final_df_combined <- bind_rows(final_df_list)
 
-# --- Part 2: 内皮细胞 (强制包含特定基因) ---
-endo_all_markers <- markers_7_types %>% 
-  filter(cluster == "Endothelial") %>%
-  arrange(desc(avg_log2FC))
-
-# (1) 提取强制基因
-valid_force <- endo_all_markers %>% 
-  filter(gene %in% endo_force_genes)
-
-# (2) 提取自动基因 (补齐到10个)
-auto_genes <- endo_all_markers %>% 
-  filter(!gene %in% endo_force_genes) %>%
-  head(n = 10 - nrow(valid_force)) 
-
-# (3) 合并内皮基因 (强制基因在前)
-top10_endo <- bind_rows(valid_force, auto_genes)
-
-# C. 合并所有数据
-final_df <- bind_rows(top10_others, top10_endo)
-
-# D. 【关键步骤】对最终列表按 my_levels 重新排序
-# 如果不加这一步，Endothelial的基因可能会跑到列表最后，导致热图错位
-final_df$cluster <- factor(final_df$cluster, levels = existing_levels)
-final_df <- final_df %>% arrange(cluster) 
-
-# 提取最终基因名
-final_gene_list <- final_df$gene
-
-print("检查内皮细胞基因顺序 (应包含 PECAM1):")
-print(final_gene_list[final_df$cluster == "Endothelial"])
+print("检查特定基因是否成功入选：")
+print(final_df_combined %>% filter(gene %in% c("PGR", "COL6A1", "PECAM1")))
 
 # ========================================================================
 # 5. 准备热图数据 (AverageExpression)
@@ -165,15 +139,15 @@ print(final_gene_list[final_df$cluster == "Endothelial"])
 avg_exp <- AverageExpression(seurat_obj, group.by = "major_cell_type", layer = "data") 
 avg_matrix <- avg_exp$RNA
 
-# 数据清洗与排序 (确保行和列都严格对齐)
-# 1. 筛选基因
+# 数据清洗与排序
+# 1. 筛选基因 (取交集，防止某些强制基因没在矩阵里)
 genes_to_keep <- intersect(final_gene_list, rownames(avg_matrix))
-avg_matrix <- avg_matrix[genes_to_keep, ]
 
-# 2. 【关键】按 final_gene_list 的顺序排列行 (Y轴顺序)
+# 2. 【关键】按 final_gene_list 的生成顺序排列行 (Y轴顺序)
+# 这里必须用 match 确保顺序完全一致
 avg_matrix <- avg_matrix[match(genes_to_keep, rownames(avg_matrix)), ] 
 
-# 3. 【关键】按 my_levels 的顺序排列列 (X轴顺序)
+# 3. 【关键】按 existing_levels 的顺序排列列 (X轴顺序)
 cols_to_keep <- intersect(existing_levels, colnames(avg_matrix))
 avg_matrix <- avg_matrix[, cols_to_keep] 
 
@@ -187,11 +161,11 @@ plot_matrix[plot_matrix < -2] <- -2
 # 6. 绘制并保存热图
 # ========================================================================
 
-# 配色方案 (经典红白蓝)
+# 配色方案
 col_fun <- colorRamp2(c(-2, 0, 2), c("#313695", "white", "#A50026"))
 
 # 保存为 PDF
-pdf("Average_Heatmap_Fixed_Order.pdf", width = 6, height = 10)
+pdf("Average_Heatmap_Custom_Markers.pdf", width = 6, height = 10)
 
 ht <- Heatmap(plot_matrix,
               name = "Z-Score",          
@@ -200,9 +174,9 @@ ht <- Heatmap(plot_matrix,
               # --- 布局设置 ---
               row_names_side = "left",   
               column_names_side = "bottom", 
-              column_names_rot = 45,      
+              column_names_rot = 45,       
               
-              # --- 排序控制 (全部关闭，完全听从我们的指令) ---
+              # --- 排序控制 (全部关闭，依赖数据本身的顺序) ---
               cluster_rows = FALSE,      
               cluster_columns = FALSE,   
               
@@ -211,8 +185,7 @@ ht <- Heatmap(plot_matrix,
               row_names_gp = gpar(fontsize = 10),      
               column_names_gp = gpar(fontsize = 12, fontface = "bold"), 
               
-              # --- 增加分割线 (可选) ---
-              # 这会在不同细胞类型之间画一条粗线，让区分更明显
+              # --- 增加分割线 ---
               column_split = factor(colnames(plot_matrix), levels = existing_levels),
               column_gap = unit(0.2, "mm"),
               border = TRUE
@@ -221,4 +194,4 @@ ht <- Heatmap(plot_matrix,
 draw(ht)
 dev.off()
 
-print("绘图完成！文件已保存为 Average_Heatmap_Fixed_Order.pdf")
+print("绘图完成！文件已保存为 Average_Heatmap_Custom_Markers.pdf")
